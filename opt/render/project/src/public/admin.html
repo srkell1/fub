@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FUB ↔ Cal — Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-7xl mx-auto p-6">
+    <header class="mb-6 flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-bold">FUB ↔ Cal — Admin Dashboard</h1>
+        <p class="text-sm text-slate-600">Live status, mappings, jobs/DLQ, pairings, and logs. Webhooks: <code>/webhooks/fub</code>, <code>/webhooks/cal</code>.</p>
+      </div>
+      <label class="flex items-center gap-2 text-sm"><input id="toggle-label" type="checkbox" checked /> Show Event Type label</label>
+    </header>
+
+    <section class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+      <div class="bg-white rounded-xl p-4 border"><div class="text-xs text-slate-500">Pending Jobs</div><div id="stat-pending" class="text-2xl font-semibold">—</div></div>
+      <div class="bg-white rounded-xl p-4 border"><div class="text-xs text-slate-500">Failed Jobs</div><div id="stat-failed" class="text-2xl font-semibold">—</div></div>
+      <div class="bg-white rounded-xl p-4 border"><div class="text-xs text-slate-500">Completed Jobs</div><div id="stat-done" class="text-2xl font-semibold">—</div></div>
+      <div class="bg-white rounded-xl p-4 border"><div class="text-xs text-slate-500">Pairings</div><div id="stat-pairs" class="text-2xl font-semibold">—</div></div>
+      <div class="bg-white rounded-xl p-4 border"><div class="text-xs text-slate-500">Server Time</div><div id="stat-time" class="text-sm">—</div></div>
+    </section>
+
+    <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <section class="bg-white rounded-2xl p-4 border">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Location → Event Type Mapping</h2>
+          <button id="btn-save-mapping" class="px-3 py-2 rounded bg-black text-white text-sm">Save</button>
+        </div>
+        <table class="w-full text-sm">
+          <thead><tr class="text-left"><th class="py-2">Location Key</th><th class="py-2">Label</th><th class="py-2">eventTypeId</th></tr></thead>
+          <tbody id="map-body"></tbody>
+        </table>
+        <button id="btn-add-row" class="mt-2 px-2 py-1 rounded bg-slate-200 text-xs">+ Add row</button>
+        <p class="text-xs text-slate-500 mt-2">Synonyms: etob/eto → etobicokeoffice, gmeet/gm → googlemeet. Default event type ID is set on the server.</p>
+      </section>
+
+      <section class="bg-white rounded-2xl p-4 border">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Jobs & Dead-Letter</h2>
+          <div class="text-sm text-slate-500">Auto-refreshing…</div>
+        </div>
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          <div>
+            <h3 class="font-medium">Recent Jobs</h3>
+            <div id="jobs" class="mt-2 max-h-64 overflow-auto border rounded p-2 text-xs"></div>
+          </div>
+          <div>
+            <h3 class="font-medium">Replay Failed</h3>
+            <div id="dlq" class="mt-2 max-h-64 overflow-auto border rounded p-2 text-xs"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="bg-white rounded-2xl p-4 border">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Idempotency Pairings</h2>
+          <div class="text-xs text-slate-500">fubAppointmentId ↔ calUid</div>
+        </div>
+        <div id="pairs" class="max-h-64 overflow-auto border rounded p-2 text-xs"></div>
+      </section>
+
+      <section class="bg-white rounded-2xl p-4 border">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Logs</h2>
+          <button id="btn-refresh" class="px-3 py-2 rounded bg-slate-200 text-sm">Refresh</button>
+        </div>
+        <div id="logs" class="max-h-64 overflow-auto border rounded p-2 text-xs"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    const fmt = (t) => new Date(t).toLocaleString();
+
+    $('btn-refresh').addEventListener('click', refreshAll);
+    $('btn-add-row').addEventListener('click', () => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="py-1 pr-2"><input class="w-full border rounded p-1 text-xs" value="newkey" /></td>
+                      <td class="py-1 pr-2"><input class="w-full border rounded p-1 text-xs" value="New Label" /></td>
+                      <td class="py-1"><input class="w-full border rounded p-1 text-xs" value="456" /></td>`;
+      $('map-body').appendChild(tr);
+    });
+
+    $('btn-save-mapping').addEventListener('click', async () => {
+      const rows = Array.from(document.querySelectorAll('#map-body tr')).map(tr => {
+        const [k, l, v] = tr.querySelectorAll('input');
+        return { key: k.value.trim(), label: l.value.trim(), event_type_id: Number(v.value) };
+      });
+      await fetch('/api/mapping', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rows) });
+      refreshMapping();
+    });
+
+    $('toggle-label').addEventListener('change', () => {/* Toggle affects admin rendering only */});
+
+    async function refreshStatus() {
+      const r = await fetch('/api/status');
+      const j = await r.json();
+      $('stat-pending').textContent = j.jobsPending;
+      $('stat-failed').textContent = j.jobsFailed;
+      $('stat-done').textContent = j.jobsDone;
+      $('stat-pairs').textContent = j.pairs;
+      $('stat-time').textContent = j.time;
+    }
+
+    async function refreshLogs() {
+      const r = await fetch('/api/logs');
+      const j = await r.json();
+      $('logs').innerHTML = j.map(l => `<div class='border-b py-1'><div class='text-slate-500'>${fmt(l.ts)} — ${l.direction} — ${l.action}</div><div>${l.message}</div></div>`).join('');
+    }
+
+    async function refreshJobs() {
+      const r = await fetch('/api/jobs');
+      const j = await r.json();
+      const jobsHTML = j.map(x => `<div class='border-b py-1'><div><b>${x.kind}</b> — ${x.status} — attempts: ${x.attempts}</div><div class='text-slate-500'>next: ${fmt(x.next_attempt_at)} | id: ${x.id}</div></div>`).join('');
+      document.getElementById('jobs').innerHTML = jobsHTML;
+      const failed = j.filter(x => x.status === 'failed');
+      document.getElementById('dlq').innerHTML = failed.map(x => `<div class='border-b py-1'><div><b>${x.kind}</b> — ${x.status} — attempts: ${x.attempts}</div><button class='mt-1 px-2 py-1 bg-black text-white rounded' onclick='replayJob("${x.id}")'>Replay</button></div>`).join('');
+    }
+
+    async function replayJob(id) {
+      await fetch('/api/jobs/replay/' + id, { method: 'POST' });
+      refreshAll();
+    }
+    window.replayJob = replayJob;
+
+    async function refreshPairs() {
+      const r = await fetch('/api/pairs');
+      const j = await r.json();
+      document.getElementById('pairs').innerHTML = j.map(x => `<div class='border-b py-1 font-mono'>${x.fub_id} ↔ ${x.cal_uid}</div>`).join('');
+    }
+
+    async function refreshMapping() {
+      const r = await fetch('/api/mapping');
+      const j = await r.json();
+      document.getElementById('map-body').innerHTML = j.map(row => `<tr><td class='py-1 pr-2'><input class='w-full border rounded p-1 text-xs' value='${row.key}' /></td><td class='py-1 pr-2'><input class='w-full border rounded p-1 text-xs' value='${row.label}' /></td><td class='py-1'><input class='w-full border rounded p-1 text-xs' value='${row.event_type_id}' /></td></tr>`).join('');
+    }
+
+    async function refreshAll() {
+      await Promise.all([refreshStatus(), refreshLogs(), refreshJobs(), refreshPairs(), refreshMapping()]);
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 4000);
+  </script>
+</body>
+</html>
